@@ -1,10 +1,9 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 Defines ffmpeg command line calling functionality.
 """
 # Import built-in modules
-from __future__ import absolute_import, print_function, unicode_literals
 import subprocess
 import tempfile
 import re
@@ -24,14 +23,10 @@ FFMPEG_UTILS_TEXT = gettext.translation(domain=__name__,
                                         languages=[constants.CURRENT_LOCALE],
                                         fallback=True)
 
-try:
-    _ = FFMPEG_UTILS_TEXT.ugettext
-except AttributeError:
-    # Python 3 fallback
-    _ = FFMPEG_UTILS_TEXT.gettext
+_ = FFMPEG_UTILS_TEXT.gettext
 
 
-class SplitIntoAudioPiece(object):  # pylint: disable=too-few-public-methods
+class SplitIntoAudioPiece:  # pylint: disable=too-few-public-methods
     """
     Class for converting a region of an input audio or video file into a short-term audio file
     """
@@ -43,18 +38,14 @@ class SplitIntoAudioPiece(object):  # pylint: disable=too-few-public-methods
             is_keep,
             cmd,
             suffix,
-            include_before=0.25,
-            include_after=0.25):
+            include_before=0.0,
+            include_after=0.0):
         self.source_path = source_path
         self.cmd = cmd
         self.suffix = suffix
         self.is_keep = is_keep
-        if is_keep:
-            self.include_before = 0.0
-            self.include_after = 0.0
-        else:
-            self.include_before = include_before
-            self.include_after = include_after
+        self.include_before = include_before
+        self.include_after = include_after
         self.output = output
 
     def __call__(self, region):
@@ -71,9 +62,10 @@ class SplitIntoAudioPiece(object):  # pylint: disable=too-few-public-methods
                                           dura=end - start,
                                           in_=self.source_path,
                                           out_=temp.name)
-                subprocess.check_output(
-                    constants.cmd_conversion(command),
-                    stdin=open(os.devnull))
+                prcs = subprocess.Popen(constants.cmd_conversion(command),
+                                        stdout=subprocess.PIPE,
+                                        stderr=subprocess.PIPE)
+                prcs.communicate()
                 return temp.name
 
             filename = self.output \
@@ -85,42 +77,56 @@ class SplitIntoAudioPiece(object):  # pylint: disable=too-few-public-methods
                                       dura=end - start,
                                       in_=self.source_path,
                                       out_=filename)
-            subprocess.check_output(
-                constants.cmd_conversion(command),
-                stdin=open(os.devnull))
+            prcs = subprocess.Popen(constants.cmd_conversion(command),
+                                    stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE)
+            err = prcs.communicate()[1]
+            if err:
+                return None
+            audio_file = open(filename, mode="rb")
+            audio_data = audio_file.read()
+            audio_file.close()
+            if len(audio_data) <= 4:
+                return None
             return filename
 
         except KeyboardInterrupt:
             return None
 
-        except subprocess.CalledProcessError:
+        except subprocess.CalledProcessError as ffmpeg_exec_error:
             raise exceptions.AutosubException(
                 _("Error: ffmpeg can't split your file. "
-                  "Check your audio processing options.")
-            )
+                  "Check your audio processing options.")) from ffmpeg_exec_error
 
 
 def ffprobe_get_fps(  # pylint: disable=superfluous-parens
         video_file,
-        input_m=input
-):
+        input_m=input):
     """
     Return video_file's fps.
     """
     try:
         command = constants.DEFAULT_VIDEO_FPS_CMD.format(in_=video_file)
         print(command)
-        input_str = subprocess.check_output(
-            constants.cmd_conversion(command),
-            stdin=open(os.devnull))
-        num_list = map(int, re.findall(r'\d+', input_str.decode(sys.stdout.encoding)))
-        if len(list(num_list)) == 2:
+        prcs = subprocess.Popen(constants.cmd_conversion(command),
+                                stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE)
+        out, err = prcs.communicate()
+        if out:
+            ffprobe_str = out.decode(sys.stdout.encoding)
+            print(ffprobe_str)
+        else:
+            ffprobe_str = err.decode(sys.stdout.encoding)
+            print(ffprobe_str)
+        num_list = map(int, re.findall(r'\d+', ffprobe_str.decode(sys.stdout.encoding)))
+        num_list = list(num_list)
+        if len(num_list) == 2:
             fps = float(num_list[0]) / float(num_list[1])
         else:
             raise ValueError
 
     except (subprocess.CalledProcessError, ValueError):
-        print(_("ffprobe(ffmpeg) can't get video fps.\n"
+        print(_("ffprobe can't get video fps.\n"
                 "It is necessary when output is \".sub\"."))
         if input_m:
             input_str = input_m(_("Input your video fps. "
@@ -128,7 +134,7 @@ def ffprobe_get_fps(  # pylint: disable=superfluous-parens
             try:
                 fps = float(input_str)
                 if fps <= 0.0:
-                    raise ValueError
+                    raise ValueError  # pylint: disable=raise-missing-from
             except ValueError:
                 print(_("Use \".srt\" instead."))
                 fps = 0.0
@@ -143,13 +149,19 @@ def ffprobe_check_file(filename):
     Give an audio or video file
     and check whether it is not empty by get its bitrate.
     """
-    command = "ffprobe {in_} -show_format -pretty -loglevel quiet".format(in_=filename)
+    print(_("\nUse ffprobe to check conversion result."))
+    command = constants.DEFAULT_CHECK_CMD.format(in_=filename)
     print(command)
-    ffprobe_bytes = subprocess.check_output(
-        constants.cmd_conversion(command),
-        stdin=open(os.devnull),
-        shell=False)
-    ffprobe_str = ffprobe_bytes.decode(sys.stdout.encoding)
+    prcs = subprocess.Popen(constants.cmd_conversion(command),
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE)
+    out, err = prcs.communicate()
+    if out:
+        ffprobe_str = out.decode(sys.stdout.encoding)
+        print(ffprobe_str)
+    else:
+        ffprobe_str = err.decode(sys.stdout.encoding)
+        print(ffprobe_str)
     bitrate_idx = ffprobe_str.find('bit_rate')
     if bitrate_idx < 0 or \
             ffprobe_str[bitrate_idx + 9:bitrate_idx + 10].lower() == 'n':
@@ -157,67 +169,19 @@ def ffprobe_check_file(filename):
     return True
 
 
-def is_exe(file_path):
-    """
-    Checks whether a file is executable.
-    """
-    return os.path.isfile(file_path) and os.access(file_path, os.X_OK)
-
-
-def which_exe(program_path):
-    """
-    Return the path for a given executable.
-    """
-    program_dir = os.path.split(program_path)[0]
-    if program_dir:
-        # if program directory exists
-        if is_exe(program_path):
-            return program_path
-    else:
-        # else find the program path
-        for path in os.environ["PATH"].split(os.pathsep):
-            path = path.strip('"')
-            program = os.path.join(path, program_path)
-            if is_exe(program):
-                return program
-        # if program located at app's directory
-        program_name = os.path.join(constants.APP_PATH, os.path.basename(program_path))
-        if is_exe(program_name):
-            return program_name
-        # if program located at current directory
-        program_name = os.path.join(os.getcwd(), os.path.basename(program_path))
-        if is_exe(program_name):
-            return program_name
-    return None
-
-
-def get_cmd(program_name):
-    """
-    Return the executable name. "None" returned when no executable exists.
-    """
-    if which_exe(program_name):
-        return program_name
-    if which_exe(program_name + ".exe"):
-        return program_name + ".exe"
-    return None
-
-
 def audio_pre_prcs(  # pylint: disable=too-many-arguments, too-many-branches
         filename,
         is_keep,
         cmds,
         output_name=None,
-        input_m=input,
-        ffmpeg_cmd="ffmpeg"
-):
+        input_m=input):
     """
     Pre-process audio file.
     """
     output_list = [filename, ]
     if not cmds:
-        cmds = constants.DEFAULT_AUDIO_PRCS
-        ffmpeg_norm_cmd = get_cmd("ffmpeg-normalize")
-        if not ffmpeg_norm_cmd:
+        cmds = constants.DEFAULT_AUDIO_PRCS_CMDS
+        if not constants.FFMPEG_NORMALIZE_CMD:
             print(_("Warning: Dependency ffmpeg-normalize "
                     "not found on this machine. "
                     "Try default method."))
@@ -245,30 +209,15 @@ def audio_pre_prcs(  # pylint: disable=too-many-arguments, too-many-branches
             command = cmds[i - 1].format(
                 in_=output_list[i - 1],
                 out_=output_list[i])
-            command = command[:7].replace('ffmpeg ', ffmpeg_cmd) + command[7:]
             print(command)
             subprocess.check_output(
                 constants.cmd_conversion(command),
                 stdin=open(os.devnull))
             if not ffprobe_check_file(output_list[i]):
-                print(_("Audio pre-processing failed. Try default method."))
                 return None
 
     else:
-        temp_file = tempfile.NamedTemporaryFile(suffix='.flac', delete=False)
-        temp = temp_file.name
-        temp_file.close()
-        if os.path.isfile(temp):
-            os.remove(temp)
-        output_list.append(temp)
-        command = cmds[0].format(
-            in_=output_list[0],
-            out_=output_list[1])
-        print(command)
-        subprocess.check_output(
-            constants.cmd_conversion(command),
-            stdin=open(os.devnull))
-        for i in range(2, len(cmds) + 1):
+        for i in range(1, len(cmds) + 1):
             temp_file = tempfile.NamedTemporaryFile(suffix='.flac', delete=False)
             temp = temp_file.name
             temp_file.close()
@@ -278,15 +227,14 @@ def audio_pre_prcs(  # pylint: disable=too-many-arguments, too-many-branches
             command = cmds[i - 1].format(
                 in_=output_list[i - 1],
                 out_=output_list[i])
-            command = command[:7].replace('ffmpeg ', ffmpeg_cmd) + command[7:]
             print(command)
             subprocess.check_output(
                 constants.cmd_conversion(command),
                 stdin=open(os.devnull))
             if not ffprobe_check_file(output_list[i]):
-                print(_("Audio pre-processing failed. Try default method."))
                 os.remove(output_list[i])
                 return None
-            os.remove(output_list[i - 1])
+            if i > 1:
+                os.remove(output_list[i - 1])
 
     return output_list[-1]

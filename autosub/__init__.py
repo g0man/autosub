@@ -1,12 +1,13 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 Defines autosub's commandline entry point functionality.
 """
 # Import built-in modules
-from __future__ import absolute_import, print_function, unicode_literals
 import os
 import gettext
+import sys
+import shlex
 
 # Import third-party modules
 import pysubs2
@@ -23,11 +24,7 @@ INIT_TEXT = gettext.translation(domain=__name__,
                                 languages=[constants.CURRENT_LOCALE],
                                 fallback=True)
 
-try:
-    _ = INIT_TEXT.ugettext
-except AttributeError:
-    # Python 3 fallback
-    _ = INIT_TEXT.gettext
+_ = INIT_TEXT.gettext
 
 
 def main():  # pylint: disable=too-many-branches, too-many-statements, too-many-locals
@@ -35,7 +32,17 @@ def main():  # pylint: disable=too-many-branches, too-many-statements, too-many-
     Run autosub as a command-line program.
     """
 
-    args = options.get_cmd_args()
+    is_pause = False
+
+    # todo1: move into constants to support locale and dependency input
+    option_parser = options.get_cmd_parser()
+    if len(sys.argv) > 1:
+        args = option_parser.parse_args()
+    else:
+        option_parser.print_help()
+        new_argv = input(_("\nInput args(without \"autosub\"): "))
+        args = option_parser.parse_args(shlex.split(new_argv))
+        is_pause = True
 
     if args.https_proxy:
         os.environ['https_proxy'] = args.https_proxy
@@ -50,29 +57,34 @@ def main():  # pylint: disable=too-many-branches, too-many-statements, too-many-
         os.environ['proxy_password'] = args.proxy_password
 
     try:
+        if args.speech_config:
+            cmdline_utils.validate_speech_config(args)
+
+        if args.auditok_config:
+            args.auditok_config = cmdline_utils.validate_json_config(args.auditok_config)
+
         if cmdline_utils.list_args(args):
             raise exceptions.AutosubException(_("\nAll works done."))
 
         if not args.yes:
-            try:
-                input_m = raw_input
-            except NameError:
-                input_m = input
+            input_m = input
         else:
             input_m = None
 
         styles_list = []
-        validate_result = cmdline_utils.validate_io(args, styles_list)
+        result = cmdline_utils.validate_io(args, styles_list)
 
-        if validate_result == 0:
-            ffmpeg_cmd = ffmpeg_utils.get_cmd("ffmpeg")
-            if not ffmpeg_cmd:
+        if result:
+            if not constants.FFMPEG_CMD:
                 raise exceptions.AutosubException(
                     _("Error: Dependency ffmpeg"
-                      " not found on this machine.")
-                )
+                      " not found on this machine."))
+            if not constants.FFPROBE_CMD:
+                raise exceptions.AutosubException(
+                    _("Error: Dependency ffprobe"
+                      " not found on this machine."))
 
-            ffmpeg_cmd = ffmpeg_cmd + ' '
+            cmdline_utils.fix_args(args)
 
             if args.audio_process:
                 args.audio_process = {k.lower() for k in args.audio_process}
@@ -81,8 +93,7 @@ def main():  # pylint: disable=too-many-branches, too-many-statements, too-many-
                 if not args.audio_process:
                     raise exceptions.AutosubException(
                         _("Error: The args of \"-ap\"/\"--audio-process\" are wrong."
-                          "\nNo works done.")
-                    )
+                          "\nNo works done."))
                 if 'o' in args.audio_process:
                     args.keep = True
                     prcs_file = ffmpeg_utils.audio_pre_prcs(
@@ -90,18 +101,14 @@ def main():  # pylint: disable=too-many-branches, too-many-statements, too-many-
                         is_keep=args.keep,
                         cmds=args.audio_process_cmd,
                         output_name=args.output,
-                        input_m=input_m,
-                        ffmpeg_cmd=ffmpeg_cmd
-                    )
+                        input_m=input_m)
                     if not prcs_file:
                         raise exceptions.AutosubException(
-                            _("No works done.")
-                        )
-                    else:
-                        args.input = prcs_file
-                        raise exceptions.AutosubException(
-                            _("Audio pre-processing complete.\nAll works done.")
-                        )
+                            _("No works done."))
+
+                    args.input = prcs_file
+                    raise exceptions.AutosubException(
+                        _("Audio pre-processing complete.\nAll works done."))
 
                 if 's' in args.audio_process:
                     args.keep = True
@@ -112,52 +119,86 @@ def main():  # pylint: disable=too-many-branches, too-many-statements, too-many-
                         is_keep=args.keep,
                         cmds=args.audio_process_cmd,
                         output_name=args.output,
-                        input_m=input_m,
-                        ffmpeg_cmd=ffmpeg_cmd
-                    )
+                        input_m=input_m)
+                    args.audio_split_cmd = \
+                        args.audio_split_cmd.replace(
+                            "-vn -ac [channel] -ar [sample_rate] ", "")
                     if not prcs_file:
-                        no_audio_prcs = False
+                        print(_("Audio pre-processing failed. Try default method."))
                     else:
                         args.input = prcs_file
                         print(_("Audio pre-processing complete."))
-                        no_audio_prcs = True
-                elif 'n' in args.audio_process:
-                    print(_("No extra check/conversion "
-                            "before the speech-to-text procedure."))
-                    no_audio_prcs = True
-                else:
-                    no_audio_prcs = False
 
             else:
-                no_audio_prcs = False
+                if args.audio_split_cmd == constants.DEFAULT_AUDIO_SPLT_CMD:
+                    # if user doesn't modify the audio_split_cmd
+                    if args.api_suffix == ".ogg":
+                        # regard ogg as ogg_opus
+                        args.audio_split_cmd = \
+                            args.audio_split_cmd.replace(
+                                "-vn",
+                                "-vn -c:a libopus")
+                    elif args.api_suffix == ".pcm":
+                        # raw pcm
+                        args.audio_split_cmd = \
+                            args.audio_split_cmd.replace(
+                                "-vn",
+                                "-vn -c:a pcm_s16le -f s16le")
+
+            args.audio_split_cmd = \
+                args.audio_split_cmd.replace(
+                    "[channel]",
+                    "{channel}".format(channel=args.api_audio_channel))
+            args.audio_split_cmd = \
+                args.audio_split_cmd.replace(
+                    "[sample_rate]",
+                    "{sample_rate}".format(sample_rate=args.api_sample_rate))
 
             cmdline_utils.validate_aovp_args(args)
-            cmdline_utils.fix_args(args,
-                                   ffmpeg_cmd=ffmpeg_cmd)
             fps = cmdline_utils.get_fps(args=args, input_m=input_m)
             cmdline_utils.audio_or_video_prcs(args,
                                               fps=fps,
                                               input_m=input_m,
-                                              styles_list=styles_list,
-                                              no_audio_prcs=no_audio_prcs)
+                                              styles_list=styles_list)
 
-        elif validate_result == 1:
-            cmdline_utils.validate_sp_args(args)
+        else:
+            result = cmdline_utils.validate_sp_args(args)
             fps = cmdline_utils.get_fps(args=args, input_m=input_m)
-            cmdline_utils.subs_trans(args,
-                                     input_m=input_m,
-                                     fps=fps,
-                                     styles_list=None)
+            if result:
+                args.output_files = args.output_files & \
+                                    constants.DEFAULT_SUB_MODE_SET
+                if not args.output_files:
+                    raise exceptions.AutosubException(
+                        _("Error: No valid \"-of\"/\"--output-files\" arguments."))
+                cmdline_utils.sub_trans(args,
+                                        input_m=input_m,
+                                        fps=fps,
+                                        styles_list=None)
+            else:
+                args.audio_split_cmd = \
+                    args.audio_split_cmd.replace(
+                        "[channel]",
+                        "{channel}".format(channel=args.api_audio_channel))
+                args.audio_split_cmd = \
+                    args.audio_split_cmd.replace(
+                        "[sample_rate]",
+                        "{sample_rate}".format(sample_rate=args.api_sample_rate))
+
+                cmdline_utils.sub_conversion(
+                    args,
+                    input_m=input_m,
+                    fps=fps
+                )
+
+        raise exceptions.AutosubException(_("\nAll works done."))
 
     except KeyboardInterrupt:
         print(_("\nKeyboardInterrupt. Works stopped."))
-        return 1
     except pysubs2.exceptions.Pysubs2Error:
         print(_("\nError: pysubs2.exceptions. Check your file format."))
-        return 1
     except exceptions.AutosubException as err_msg:
         print(err_msg)
-        return 0
 
-    print(_("\nAll works done."))
+    if is_pause:
+        input(_("Press Enter to exit..."))
     return 0

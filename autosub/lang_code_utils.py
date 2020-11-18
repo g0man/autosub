@@ -1,29 +1,28 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 Defines autosub's lang codes functionality.
 """
 # Import built-in modules
-from __future__ import absolute_import, print_function, unicode_literals
 import gettext
 
 # Import third-party modules
-import langcodes
 import wcwidth
 
 # Any changes to the path and your own modules
 from autosub import constants
+
+if not constants.langcodes_:
+    from fuzzywuzzy import process
+else:
+    process = None  # pylint: disable=invalid-name
 
 LANG_CODE_TEXT = gettext.translation(domain=__name__,
                                      localedir=constants.LOCALE_PATH,
                                      languages=[constants.CURRENT_LOCALE],
                                      fallback=True)
 
-try:
-    _ = LANG_CODE_TEXT.ugettext
-except AttributeError:
-    # Python 3 fallback
-    _ = LANG_CODE_TEXT.gettext
+_ = LANG_CODE_TEXT.gettext
 
 
 def better_match(desired_language,
@@ -57,18 +56,22 @@ def better_match(desired_language,
 
     match_scores = []
     unsupported_languages = []
-    for supported in supported_languages:
-        try:
-            score = langcodes.tag_match_score(desired_language, supported)
-            match_scores.append((supported, score))
-        except langcodes.tag_parser.LanguageTagError:
-            unsupported_languages.append(supported)
-            continue
-
-    match_scores = [
-        (supported, score) for (supported, score) in match_scores
-        if score >= min_score
-    ]
+    if constants.langcodes_:
+        for supported in supported_languages:
+            try:
+                score = constants.langcodes_.tag_match_score(desired_language, supported)
+                if score >= min_score:
+                    match_scores.append((supported, score))
+            except constants.langcodes_.tag_parser.LanguageTagError:
+                unsupported_languages.append(supported)
+                continue
+    else:
+        match_scores = process.extract(query=desired_language,
+                                       choices=supported_languages)
+        match_scores = [
+            (supported, score) for (supported, score) in match_scores
+            if score >= min_score
+        ]
 
     if not match_scores:
         match_scores.append(('und', 0))
@@ -81,8 +84,7 @@ def better_match(desired_language,
 def wjust(
         str_just,
         length,
-        is_left=True
-):
+        is_left=True):
     """
     Use wcwidth to just string.
     """
@@ -110,6 +112,9 @@ def match_print(
 
     print(_("Now match lang codes."))
 
+    if not constants.langcodes_:
+        print(_("Langcodes dependency not found. Use fuzzywuzzy instead."))
+
     if min_score < 0 or min_score > 100:
         print(_("The value of arg of \"-mns\"/\"--min-score\" isn't legal."))
         return None
@@ -125,8 +130,7 @@ def match_print(
     match_scores = better_match(
         desired_language=dsr_lang,
         supported_languages=match_list,
-        min_score=min_score
-    )[0]
+        min_score=min_score)[0]
     if match_scores[0][0] == 'und':
         print(_("No lang codes been matched."))
         return None
